@@ -361,13 +361,12 @@ method post($url,$content) {
 
 =head1 AUTHOR
 
-Dale Evans, C<< <daleevans@github> >> http://devans.mycanadapayday.com
+Dale Evans, C<< <daleevans@github> >> L<http://devans.mycanadapayday.com>
 
 =head1 SEE ALSO
 
-https://rocket.chat/docs/master/developer-guides/rest-api/
+L<Developer Guide (REST API)|https://rocket.chat/docs/master/developer-guides/rest-api>
 
 =cut
 
 1;
-
