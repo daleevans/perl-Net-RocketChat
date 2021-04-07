@@ -1,6 +1,6 @@
 package Net::RocketChat;
 # ABSTRACT: Implements the REST API for Rocket.Chat
-
+$Net::RocketChat::VERSION = '0.003';
 =head1 NAME
 
 Net::RocketChat
@@ -29,12 +29,12 @@ Most errors die.  Use eval generously.
    my $chat = Net::RocketChat->new;
    eval {
       $chat->login;
-      $chat->join(room => "general");
+      # DEPRECATED: $chat->join(room => "general");
       my $messages = $chat->messages(room => "general");
       print Dump($messages);
       $chat->send(room => "general",message => "your message goes here");
       $chat->send(room => "general",message => "```\nmulti-line\npastes\nare\nok```");
-      $chat->leave(room => "general");
+      # DEPRECATED: $chat->leave(room => "general");
    };
    if ($@) {
       print "caught an error: $@\n";
@@ -62,7 +62,7 @@ If debug is set, lots of stuff will get dumped to STDERR.
 
 has 'debug' => (
    is => 'rw',
-   required => 1,
+   default => 0,
 );
 
 =item username
@@ -73,7 +73,6 @@ If this isn't specified, defaults to $ENV{ROCKETCHAT_USERNAME}
 
 has 'username' => (
    is => 'rw',
-   required => 1,
 );
 
 =item password
@@ -84,7 +83,6 @@ If this isn't specified, defaults to $ENV{ROCKETCHAT_PASSWORD}
 
 has 'password' => (
    is => 'rw',
-   required => 1,
 );
 
 =item server
@@ -97,7 +95,6 @@ If this isn't specified, defaults to $ENV{ROCKETCHAT_SERVER}
 
 has 'server' => (
    is => 'rw',
-   required => 1,
 );
 
 =item response
@@ -146,22 +143,22 @@ method BUILD($x) {
 
 =item version
 
-Returns a hashref of versions, currently of the API and server.
+Returns the server version.
 
-   "versions": {
-      "api": "0.1",
-      "rocketchat": "0.5"
+   {
+      "success" : true,
+      "version" : "3.12.3"
    }
 
 =cut
 
 method version {
-   $self->response($self->ua->get($self->server . "/api/version"));
+   $self->response($self->ua->get($self->server . "/api/info"));
    if ($self->debug) {
       print STDERR Dump($self->response);
    }
    my $json = decode_json($self->response->content);
-   return $json->{versions};
+   return $json->{version};
 }
 
 =item login
@@ -171,7 +168,7 @@ Logs in.
 =cut
 
 method login {
-   $self->response($self->ua->post($self->server . "/api/login",{user => $self->username,password => $self->password}));
+   $self->response($self->ua->post($self->server . "/api/v1/login",{user => $self->username,password => $self->password}));
    if ($self->debug) {
       print STDERR Dump($self->response);
    }
@@ -189,7 +186,7 @@ Logs out.
 =cut
 
 method logout {
-   $self->get($self->server . "/api/logout");
+   $self->get($self->server . "/api/v1/logout");
    if ($self->debug) {
       print STDERR Dump($self->response);
    }
@@ -227,15 +224,40 @@ Fetches a list of rooms, and also stores a mapping of names to ids for future us
 =cut
 
 method publicRooms {
-   $self->get($self->server . "/api/publicRooms");
+   $self->get($self->server . "/api/v1/rooms.get");
    if ($self->debug) {
       print STDERR Dump($self->response);
    }
    my $rooms = decode_json($self->response->content);
-   foreach my $room (@{$rooms->{rooms}}) {
-      $self->{rooms}{$room->{name}}{id} = $room->{_id};
+   foreach my $room (@{$rooms->{"update"}}) {
+     my $n;
+     # only private rooms have names
+     if (defined $room->{name}) {
+       $n = $room->{name}
+     } else {
+       $n = $room->{_id}
+     }
+     $self->{rooms}{$n}{id} = $room->{_id};
    }
-   return $rooms;
+
+   $self->{rooms_cached} = 1;
+
+   return $rooms->{"update"};
+}
+
+=item getRooms
+
+Returns a list of rooms and their names.
+
+=cut
+
+method getRooms {
+    if (not $self->{rooms_cached})
+    {
+      $self->publicRooms;
+    }
+
+    return $self->{rooms};
 }
 
 =item has_room(:$room)
@@ -243,7 +265,6 @@ method publicRooms {
 Returns 1 if a room exists on the server, 0 otherwise.
 
    if ($chat->has_room("general") {
-      $chat->join(room => "general");
       $chat->send(room => "general", message => "Hello, world!");
    }
    else {
@@ -253,8 +274,9 @@ Returns 1 if a room exists on the server, 0 otherwise.
 =cut
 
 method has_room(:$room) {
+   #print "DEBUG-HR: $room\n";
    eval {
-      $self->get_room_id($room);
+      $self->get_room_id(room => "$room");
    };
    if ($@) {
       return 0;
@@ -266,15 +288,19 @@ method has_room(:$room) {
 
 =item join(:$room,:$room)
 
+DEPRECATED for rooms?
+
 Joins a room.  Rooms have a human readable name and an id.  You can use either, but if the name isn't known it will automatically fetch a list of rooms.
 
    $chat->join(room => "general");
 
+See: https://developer.rocket.chat/api/rest-api/methods/channels/join
+
 =cut
 
 method join(:$id,:$room) {
-   $id //= $self->get_room_id($room);
-   $self->post($self->server . "/api/rooms/$id/join","{}");
+   $id //= $self->get_room_id(room => "$room");
+   $self->post($self->server . "/api/v1/channels.join?roomId=$id");
    if ($self->debug) {
       print STDERR Dump($self->response);
    }
@@ -282,15 +308,19 @@ method join(:$id,:$room) {
 
 =item leave(:$id,:$room)
 
-Leaves a room, specified either by name or id.
+Leaves a room/channel (NEEDS CLARIFICATION), specified either by name or id.
 
    $chat->leave(room => "general");
+
+See: https://developer.rocket.chat/api/rest-api/methods/channels/leave
+See: https://developer.rocket.chat/api/rest-api/methods/rooms/leave
 
 =cut
 
 method leave(:$id,:$room) {
-   $id //= $self->get_room_id($room);
-   $self->post($self->server . "/api/rooms/$id/leave","{}");
+   $id //= $self->get_room_id(room => "$room");
+#   $self->post($self->server . "/api/v1/channels.leave?roomId=$id");
+   $self->post($self->server . "/api/v1/rooms.leave?roomId=$id");
    if ($self->debug) {
       print STDERR Dump($self->response);
    }
@@ -305,15 +335,52 @@ Gets all the messages from a room, specified either by name or id.
 =cut
 
 method messages(:$id,:$room) {
-   $id //= $self->get_room_id($room);
-   $self->get($self->server . "/api/rooms/$id/messages");
+   $id //= $self->get_room_id(room => "$room");
+   $self->get($self->server . "/api/v1/im.history?roomId=$id\&count=10000");
    if ($self->debug) {
       print STDERR Dump($self->response);
    }
    return decode_json($self->response->content);
 }
 
+=item files(:$room,:$id)
+
+Gets all the files from a room, specified either by name or id.
+
+   my $files = $chat->files(room => "general");
+
+=cut
+
+method files(:$id,:$room) {
+   $id //= $self->get_room_id(room => "$room");
+   $self->get($self->server . "/v1/im.files?roomId=$id");
+   if ($self->debug) {
+      print STDERR Dump($self->response);
+   }
+   return decode_json($self->response->content);
+}
+
+=item getFile($fileURL)
+
+Downloads an attached file from a message, specified by the fileURL.
+
+   my $file = $chat->getFile("file-upload/pJtGHynLYC7zt8uaW/2021-03-24T10:15:56.485Z");
+
+=cut
+
+method getFile($fileURL) {
+   $self->get($self->server . "$fileURL");
+   if ($self->debug) {
+      print STDERR Dump($self->response);
+   }
+   return $self->response->content;
+}
+
 =item send(:$room,:$id,:$message)
+
+method NEEDS TO BE UPDATED to the new API
+
+The appropriate new API calls are most likely: chat.sendMessage or chat.postMessage
 
 Sends a message to a room.
 
@@ -322,11 +389,11 @@ Sends a message to a room.
 =cut
 
 method send(:$room,:$id,:$message) {
-   $id //= $self->get_room_id($room);
+   $id //= $self->get_room_id(room => "$room");
    my $msg = {
       msg => $message,
    };
-   $self->post($self->server . "/api/rooms/$id/send",encode_json($msg));
+   $self->post($self->server . "/api/v1/rooms/$id/send",encode_json($msg));
    if ($self->debug) {
       print STDERR Dump($self->response);
    }
@@ -334,7 +401,8 @@ method send(:$room,:$id,:$message) {
 }
 
 # looks up a room's internal id or fetches from the server if it couldn't be found.  throws an exception if it's an invalid room name.
-method get_room_id($room) {
+method get_room_id(:$room) {
+    #print "DEBUG-GRI: $room\n";
    if (not exists $self->{rooms}{$room}) {
       print STDERR "couldn't find room $room, checking server\n" if ($self->debug);
       $self->publicRooms;
@@ -361,11 +429,17 @@ method post($url,$content) {
 
 =head1 AUTHOR
 
-Dale Evans, C<< <daleevans@github> >> http://devans.mycanadapayday.com
+Dale Evans, C<< <daleevans@github> >> L<http://devans.mycanadapayday.com>
+
+2021: Adaptation to the new API: Andy Spiegl, C<< <a.spiegl+rocketchat@lmu.de> >>
+
+=head1 REPOSITORY
+
+L<https://github.com/daleevans/perl-Net-RocketChat>
 
 =head1 SEE ALSO
 
-https://rocket.chat/docs/master/developer-guides/rest-api/
+L<Developer Guide (REST API)|https://developer.rocket.chat/api/rest-api>
 
 =cut
 
