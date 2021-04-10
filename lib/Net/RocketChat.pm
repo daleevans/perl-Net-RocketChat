@@ -973,7 +973,15 @@ L<https://github.com/raid1/perl-Net-RocketChat>
 
 L<Developer Guide (REST API)|https://developer.rocket.chat/api/rest-api>
 
+Dale Evans, C<< <daleevans@github> >> L<http://devans.mycanadapayday.com>
+
+=head1 REPOSITORY
+
+L<https://github.com/daleevans/perl-Net-RocketChat>
+
+=head1 SEE ALSO
+
+
 =cut
 
 1;
-
