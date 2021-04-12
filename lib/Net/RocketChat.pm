@@ -688,7 +688,7 @@ method getFilesList(:$id,:$room) {
    $id //= $self->get_room_id(room => "$room");
    $room //= $self->get_room_name(id => "$id");
 
-   $self->get($self->server . "/v1/im.files?roomId=$id");
+   $self->get($self->server . "/api/v1/im.files?roomId=$id");
    if ($self->debug) {
       print STDERR Dumper($self->response);
    }
