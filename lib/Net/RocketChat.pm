@@ -311,6 +311,35 @@ method logout {
    }
 }
 
+=item getUserInfo(:$username,:$userid)
+
+Gets all user details, specified either by username or id.
+
+   my $userinfo = $chat->getUserInfo(username => "ab123cde");
+
+=cut
+
+method getUserInfo(:$username,:$userid) {
+   if (not $userid and not $username)
+   {
+     die "ERROR: getUserInfo needs either userid or username";
+   }
+
+   if ($username)
+   {
+     $self->get($self->server . "/api/v1/users.info?username=$username");
+   }
+   else
+   {
+     $self->get($self->server . "/api/v1/users.info?userId=$userid");
+   }
+
+   if ($self->debug) {
+      print STDERR Dumper($self->response);
+   }
+   return decode_json($self->response->content)->{"user"};
+}
+
 =item getMyRooms
 
 Fetches a list of (joined) rooms, and also stores the room type and a mapping of names to ids for future use.
@@ -973,15 +1002,7 @@ L<https://github.com/raid1/perl-Net-RocketChat>
 
 L<Developer Guide (REST API)|https://developer.rocket.chat/api/rest-api>
 
-Dale Evans, C<< <daleevans@github> >> L<http://devans.mycanadapayday.com>
-
-=head1 REPOSITORY
-
-L<https://github.com/daleevans/perl-Net-RocketChat>
-
-=head1 SEE ALSO
-
-
 =cut
 
 1;
+
