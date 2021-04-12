@@ -1,6 +1,6 @@
 package Net::RocketChat;
 # ABSTRACT: Implements the REST API for Rocket.Chat
-$Net::RocketChat::VERSION = '0.005';
+$Net::RocketChat::VERSION = '0.006';
 =head1 NAME
 
 Net::RocketChat
@@ -819,6 +819,10 @@ method saveAttachment(:$att, :$downloadFolder) {
   { $fext='jpg'; }
   elsif ($ft eq 'image/png')
   { $fext='png'; }
+  elsif ($ft eq 'audio/mpeg')
+  { $fext='mp3'; }
+  elsif ($ft eq 'video/mp4')
+  { $fext='mp4'; }
   elsif ($ft eq 'application/pdf')
   { $fext='pdf'; }
   else
@@ -830,6 +834,17 @@ method saveAttachment(:$att, :$downloadFolder) {
   if ($fext and $fn !~ /\.$fext$/)
   {
     $fn .= "." . $fext;
+  }
+
+  # don't overwrite existing files
+  if (-e "$downloadFolder/$fn")
+  {
+    my $fnNum = 1;
+    while ( -e $downloadFolder ."/". $fnNum ."-". $fn )
+    {
+      $fnNum++;
+    }
+    $fn = $fnNum ."-". $fn;
   }
 
   # download and save attachment
