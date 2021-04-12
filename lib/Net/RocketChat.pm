@@ -1,6 +1,6 @@
 package Net::RocketChat;
 # ABSTRACT: Implements the REST API for Rocket.Chat
-$Net::RocketChat::VERSION = '0.004';
+$Net::RocketChat::VERSION = '0.005';
 =head1 NAME
 
 Net::RocketChat
@@ -745,9 +745,10 @@ method getFile(:$fileURL) {
 
 Downloads and saves an attached file from a message, specified by the fileURL.
 Tries to find a good filename and file extension.
-Returns the filename.
 
-   my $filename = $chat->saveAttachment(att => $attachmentObject, downloadFolder => "savedFiles);
+Returns the filename and the MIME type, e.g. "image/gif".
+
+   my ($filename, $filetype) = $chat->saveAttachment(att => $attachmentObject, downloadFolder => "savedFiles);
 
 =cut
 
@@ -841,7 +842,7 @@ method saveAttachment(:$att, :$downloadFolder) {
   print ATT $self->getFile( fileURL => $att->{title_link} );
   close ATT;
 
-  return $fn;
+  return ($fn, $ft);
 }
 
 =item send(:$room,:$id,:$message)
