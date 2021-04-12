@@ -1,6 +1,6 @@
 package Net::RocketChat;
 # ABSTRACT: Implements the REST API for Rocket.Chat
-$Net::RocketChat::VERSION = '0.003';
+$Net::RocketChat::VERSION = '0.004';
 =head1 NAME
 
 Net::RocketChat
