@@ -1,0 +1,1289 @@
+#!/usr/bin/perl
+#
+# rocketchat-to-mail  --  download all chats from Rocketchat and save them in mail (mbox) format
+#
+# Dr. Andy Spiegl
+#
+############################################
+#
+# History:
+#
+# v0.1  2021-04-06: fork of threema-backup-to-mail
+# v0.2  2021-04-12: all necessary features implemented
+# v0.3  2021-04-12: merge with rocketchat-to-text (option --text-output)
+# v0.4  2021-04-13: handle multiple replies correctly, highlight emojis
+#
+############################################
+
+my $VERSION = "0.4";
+
+############################################
+
+use strict;
+use warnings;
+
+use Getopt::Long;
+use Pod::Usage;
+
+use POSIX qw(strftime);
+
+use Date::Manip;
+&Date_Init();
+my $oo_date = new Date::Manip::Date;
+my $err;
+
+use JSON;
+
+use MIME::Lite;
+use MIME::Words qw/encode_mimewords decode_mimewords/;
+
+use File::MimeInfo::Magic qw#mimetype extensions#;
+
+# for debugging
+use Data::Dumper;
+
+use Encode;
+
+# apt install liburi-find-perl
+use URI::Find;
+
+
+# security for shell calls:
+$ENV{'PATH'} = '/bin:/usr/bin';
+delete @ENV{'IFS', 'CDPATH', 'ENV', 'BASH_ENV'};
+
+
+############################################
+# CONFIGURABLE VARIABLES
+############################################
+
+my $debug = 0;
+
+# PREREQUISITES:
+# apt install liburi-find-perl
+# apt install libmoose-perl libmethod-signatures-perl
+# cpan: install Net::RocketChat
+# or: https://github.com/daleevans/perl-Net-RocketChat, https://github.com/raid1/perl-Net-RocketChat
+use lib '/home/XXX/local/lib/perl';   # change this to YOUR perl-lib path
+use Net::RocketChat;
+
+my $MAILDOMAIN="chat.MYSERVER.de";     # used for the TO-line in the output mail
+
+# get Rocketchat credentials from the shell environment
+my $username = $ENV{ROCKETCHAT_USERNAME};
+my $server = $ENV{ROCKETCHAT_SERVER};
+#$ENV{ROCKETCHAT_USERID} = "....";
+#$ENV{ROCKETCHAT_AUTHTOKEN} = "....";
+
+# colors for HTML emails
+my $colorSender="darkred";
+my $colorReceiver="blue";
+my $colorMsgName="darkgreen";
+my $colorMsgStatus="lightblue";
+my $colorReply="grey";
+my $colorSubthread="orange";
+my $colorEmojiFG="#ffd700";
+my $colorEmojiBG="#6495ed";
+my $indentSender="> ";
+my $indentReceiver="";
+my $indentStatus="=== ";
+
+
+############################################
+# global VARIABLES
+############################################
+my $errors_occurred = 0;
+my $warnings_occurred = 0;
+
+my %specialMsg = (
+                  'wm' => 'Willkommen, __N__',
+                  'rm' => '[Die Nachricht wurde entfernt]',
+                  'r'  => '[Raumname geändert von __N__ zu: __T__]',
+                  't'  => '[Raumname geändert von __N__ zu: __T__]',
+                  'au' => '[Der Benutzer __T__ wurde von __N__ hinzugefügt]]',
+                  'ru' => '[Benutzer __T__ wurde von __N__ entfernt]',
+                  'ut' => '[__N__ (__T__) ist der Unterhaltung beigetreten]',
+                  'uj' => '[__N__ (__T__) ist dem Kanal beigetreten]',
+                  'ul' => '[__N__ hat den Kanal verlassen]',
+                  'user-muted' => '[Benutzer __T__ wurde das Chatten von __N__ verboten]',
+                  'user-unmuted' => '[Benutzer __T__ wurde das Chatten von __N__ wieder erlaubt]',
+                  'subscription-role-added' => '[__T__ ist jetzt __R__, geändert von __N__]',
+                  'subscription-role-removed' => '[__T__ ist nicht länger __R__, geändert von __N__]',
+                  'room_changed_description' => '[Raumbeschreibung wurde von __N__ geändert zu: __T__]',
+                  'room_changed_topic' => '[Thema des Raums wurde von __N__ geändert zu: __T__]',
+                  'room_changed_avatar' => '[Avatar des Raums geändert von __N__]',
+                  'room_changed_announcement' => '[Ankündigung des Raums wurde von __N__ geändert zu: __T__]',
+                  'room_changed_privacy' => '[Der Raum wurde von __N__ zum/r __T__ geändert]',
+                  'message_pinned' => '[Eine Nachricht wurde angeheftet]',
+                  'jitsi_call_started' => '[Ein Video-Anruf wurde gestartet]',
+                  'discussion-created' => '[Unterhaltung begonnen: __T__]',
+                );
+
+############################################
+# some self detection
+############################################
+my $self = $0; $self =~ s|.*/||;
+
+my $hostname = `/bin/hostname -f`;
+chomp $hostname;
+$hostname="none" unless $hostname;
+
+my ($UID, $EUID, $GID, $EGID);
+$UID=(getpwuid( $< ))[0]; $EUID=(getpwuid( $> ))[0];
+$GID=(getgrgid( $( ))[0]; $EGID=(getgrgid( $) ))[0];
+
+# turn off buffering (sinnvoll für Debugging)
+$| = 1  if $debug;
+
+
+############################################
+# command line options
+############################################
+# option defaults
+my $showhelp = 0;
+my $showmanpage = 0;
+my $showversion = 0;
+my $sinceDate = 0;
+my $onlythisroom;
+my $downloadDir;
+my $textOutputOnly;
+
+GetOptions(
+   'help|usage'     => \$showhelp,       # show usage
+   'manpage'        => \$showmanpage,    # show manpage
+   'version'        => \$showversion,    # show programm version
+   'debug+'         => \$debug,          # (incremental option)
+   'since=s'        => \$sinceDate,      # ignore everything before this date
+   'room=s'         => \$onlythisroom,   # only process this chat room
+   'dir=s'          => \$downloadDir,    # directory for downloaded message attachments
+   'text-output'    => \$textOutputOnly, # text output instead of emails
+          ) or pod2usage(-exitstatus => 1, -verbose => 0);
+
+# are there more arguments?
+if ($#ARGV >= 0)
+{
+  pod2usage(-message => "ERROR: unknown arguments \"@ARGV\".\n",
+            -exitstatus => 2,
+            -verbose => 0
+           );
+}
+
+pod2usage(-exitstatus => 0, -verbose => 1)  if $showhelp;
+pod2usage(-exitstatus => 0, -verbose => 2)  if $showmanpage;
+
+if ($showversion)
+{ print "$self - Version: $VERSION\n"; exit; }
+
+if ($debug)
+{
+  print STDERR "DEBUG Mode($debug): switching $self (v$VERSION) to debug mode.\n";
+}
+
+if ($sinceDate)
+{
+  $err = $oo_date->parse($sinceDate);
+  if ($err)
+  {
+    &error_exit("DATE PARSE ERROR of \"$sinceDate\": ". $oo_date->err(), 50);
+
+    # show help screen and exit
+    pod2usage(-exitstatus => 5, -verbose => 1);
+  }
+
+  &print_info("Ignoring everything before ". $oo_date->printf("%Y-%m-%d %H:%M:%S"));
+
+  $sinceDate = $oo_date->secs_since_1970_GMT();    # convert to epoch
+}
+
+# remove trailing slash
+if ($downloadDir and $downloadDir =~ m|/$|)
+{
+  $downloadDir =~ s|/$||;
+}
+
+
+############################################
+# Main Program
+############################################
+
+print STDERR "Starting $self (v$VERSION)\n"  if $debug > 2;
+
+
+#####################
+# login to the Rocketchat server
+# (read credentials from the environment, see config variables above)
+#####################
+#my $chat = Net::RocketChat->new(username => $username, password => $password, server => $server, debug => $debug);
+
+#my $chat = Net::RocketChat->new(server => $server, debug => $debug);
+my $chat = Net::RocketChat->new(server => $server);
+
+print "RC-version: ", $chat->version, "\n"  if $debug > 2;
+
+$chat->login;
+
+my $myRooms=$chat->getMyRooms;
+print STDERR Dumper($myRooms)  if $debug > 5;
+
+
+#####################
+# all chat rooms or just one
+#####################
+my @roomsToProcess;
+
+if ($onlythisroom)
+{
+  @roomsToProcess = ( $onlythisroom );
+}
+else
+{
+  @roomsToProcess = keys %{$myRooms};
+}
+
+print STDERR Dumper @roomsToProcess  if $debug > 2;
+
+
+#####################
+# loop through all my chat rooms
+#####################
+foreach my $roomname ( @roomsToProcess )
+{
+  # reset for every chat room
+  my %MSGcache;                 # cache all messages by _id
+  my %timePrev = ();            # timestamp of previous message
+  my (%chat, %chatHTML, %attachments); # sort by days
+  my ($senderEmail, $senderName);
+  my $currentThread = 0;
+  my ($color, $indent);
+  my $userinfo;
+  my $groupchat = 0;
+
+  &print_info("Processing room: $roomname (id: $myRooms->{$roomname}{id})");
+
+  my $msg;
+  if ($chat->has_room(room => $roomname))
+  {
+    $msg = $chat->getRoomMessages(room => $roomname);
+    print STDERR "Messages in $roomname:\n" . Dumper($msg)  if $debug > 5;
+  }
+  else
+  {
+    print "No such room $roomname\n";
+  }
+
+  # group or person?
+  eval {
+    $userinfo = $chat->getUserInfo(username => $roomname);
+  };
+  if ($@) {
+    $groupchat = 1;
+  }
+  print STDERR Dumper($userinfo)  if $debug > 5;
+
+  # calculate sender name from roomname, e.g. "xx99aaa" (login ID) or channel name "YYY"
+  if (not $groupchat)
+  {
+    $senderName = &convertToUTF8( $userinfo->{name} );
+    if ($senderName =~ /(.+), (.+)/)
+    {
+      $senderName = $2 ." ". $1;
+      $senderEmail = &getSenderEmail($2, $1);
+    }
+    else
+    {
+      my $sn = $senderName;
+      $sn =~ s/\s+/_/g;
+      $senderEmail = &getSenderEmail('', $sn);
+    }
+
+    print STDERR "Found private chat room with \"$senderName\" ($senderEmail)\n"  if $debug;
+  }
+
+  else
+  {
+    $senderName = $roomname;
+    my $sn = $senderName;
+    $sn =~ s/\s+/_/g;
+    $senderEmail = &getSenderEmail('', $sn);
+
+    print STDERR "Found group chat \"$senderName\" ($senderEmail)\n"  if $debug;
+  }
+
+
+  #####################
+  # process all messages in chat room
+  #####################
+  my $msgDatePrev = 0;
+
+  foreach my $m (sort { $a->{ts} cmp $b->{ts} } @{$msg} )
+  {
+    my ($msgTime, $msgDate, $msgSender, $msgSenderName, $msgName, $thread, $foundAttachment);
+
+    my ($text, $textPretty) = ('', '');
+    my ($textPre, $textPrePretty) = ('', '');
+    my ($textPost, $textPostPretty) = ('', '');
+
+    my @replyTo = ();
+
+
+    # skip if too old
+    $msgTime = &convertTStoEpochSecs($m->{ts});
+    next if $msgTime < $sinceDate;
+
+    $msgDate = &convertTS( $m->{ts}, "%Y-%m-%d" );
+
+    $msgSender = $m->{u}->{username};
+    $msgSenderName = &convertToUTF8($m->{u}->{name});
+    $msgSender //= "unknown";
+    $msgSenderName //= "unknown";
+
+    $thread = $m->{tmid}  if $m->{tmid};
+    # TODO optional: show thread msgs separately using: api/v1/chat.getThreadMessages?tmid=...
+
+    ############
+    # start each line with timestamp
+    $text = &convertTS( $m->{ts}, "%H:%M:%S");
+    $textPretty = $text ."&nbsp;&nbsp;";
+    $text = $text ."  ";
+
+    ############
+    # separate messages with newlines when there is a time gap
+    if (defined $timePrev{$msgDate})
+    {
+      print STDERR "DIFF: ", $msgTime - $timePrev{$msgDate}, "\n"  if $debug > 5;
+
+      # more than 10 minutes have passed since last message?
+      if ($msgTime > $timePrev{$msgDate} + 10*60 )
+      {
+        # add newline after a short chat pause
+        $textPre = "\n" . $textPre;
+        $textPrePretty = "<br/>\n" . $textPrePretty;
+      }
+      if ($msgTime > $timePrev{$msgDate} + 45*60 )
+      {
+        if (not $thread)        # but not in a thread
+        {
+          # start new paragraph after a longer chat pause
+          $textPre = "\n" . $textPre;
+          $textPrePretty = "<br/>\n" . $textPrePretty;
+        }
+      }
+    }
+    $timePrev{$msgDate} = $msgTime;
+
+
+    ############
+    # set colors and indentation
+    if ($m->{t})                # server or bot message
+    {
+      $color = $colorMsgStatus;
+      $indent = $indentStatus;
+
+      $text .= $indent;
+    }
+    else
+    {
+      # human message
+      if ($groupchat)
+      {
+        $indent = '';
+        $msgName = "$msgSenderName ($msgSender): ";
+        if ($msgSender eq $username)
+        {
+          # msg from me
+          $color = $colorReceiver;
+        }
+        else
+        {
+          # msg from others
+          $color = $colorSender;
+        }
+      }
+
+      else   # 1:1 chat
+      {
+        if ($msgSender eq $username)
+        {
+          # msg from me
+          $color = $colorReceiver;
+          $indent = $indentReceiver;
+        }
+        else
+        {
+          # msg from chat partner
+          $color = $colorSender;
+          $indent = $indentSender;
+        }
+      }
+
+      if ($groupchat)
+      {
+        $text .= $msgName;
+        $textPretty .= "<span style=\"color:$colorMsgName\">$msgName</span>";
+      }
+      else   # 1:1 chat
+      {
+        $text .= $indent;
+      }
+    }
+
+    $textPretty .= "<span style=\"color:$color\">";
+
+
+    ############
+    # first, take care of attachments (because it sets @replyTo which we need before processing the msg text)
+    $foundAttachment = 0;
+    if ($m->{attachments})
+    {
+      print STDERR Dumper($m->{attachments})  if $debug > 3;
+
+      my %attUIDs = ();
+      my $attNum = 0;
+      my $attDesc;
+
+      foreach my $att ( @{ $m->{attachments} } )
+      {
+        # no real attachment if this is a reply to a previous message
+        if ($att->{message_link})
+        {
+          push @replyTo, $attNum;
+          $attNum++;
+          next;
+        }
+
+        # useless attachment?
+        if (not $att->{type})
+        {
+          $attNum++;
+          next;
+        }
+
+        if ($att->{type} eq 'file')
+        {
+          $foundAttachment = 1;
+          $textPost .= " Anhang: ";
+          $textPostPretty .= "&nbsp;Anhang: ";
+
+          $attDesc = &convertToUTF8( $att->{description} )  if $att->{description};
+
+          if ($downloadDir)
+          {
+            my ($fn, $ft) = $chat->saveAttachment(att => $att, downloadFolder => $downloadDir);
+            if ($fn)
+            {
+              $fn = &convertToUTF8($fn);
+
+              # compute a unique attachment ID
+              my $attUIDnum = 1;
+              my $attUID = $m->{_id};
+              if ($attUIDs{"$attUID"})
+              {
+                while ($attUIDs{$attUID ."-". $attUIDnum})
+                {
+                  $attUIDnum++;
+                }
+                $attUID .= "-". $attUIDnum;
+              }
+              $attUIDs{"$attUID"} = 1;
+
+              my %attachment;
+              $attachment{'UID'} = $attUID;
+              $attachment{'Name'} = $fn;
+              $attachment{'Type'} = $ft;
+              $attachment{'Path'} = $downloadDir ."/". $fn;
+              push @{ $attachments{$msgDate} }, \%attachment;
+
+              if ($attDesc)
+              {
+                $attDesc .= " ($fn)";
+              }
+              else
+              {
+                $attDesc = $fn;
+              }
+
+              $textPost .= "\"". $attDesc ."\""; #  [$attUID]
+              $textPost .= " ($ft)"  if $ft;
+
+              # show preview of picture inline
+              if ($ft =~ /^image/)
+              {
+                $textPostPretty .= "<img width=\"90%\" alt=\"". $attDesc ."\" src=\"cid:$attUID\" />";
+              }
+              else
+              {
+                $textPostPretty .= "\"". $attDesc ."\"";
+              }
+            }
+
+            else                # no $fn
+            {
+              if ($att->{title})
+              {
+                $attDesc //= &convertToUTF8($att->{title});
+                $textPost .= "\"". $attDesc ."\" ";
+                $textPostPretty .= "\"". $attDesc ."\" ";
+                &print_warning("attachment in message $m->{_id} not downloadable (". $attDesc .")");
+              }
+              else
+              {
+                &print_warning("attachment in message $m->{_id} not downloadable");
+              }
+              $textPost .= "(WARNING: not downloadable)";
+              $textPostPretty .= "(WARNING: not downloadable)";
+            }
+          }
+
+          else                  # no downloadDir -> not downloading attachments
+          {
+            if ($att->{title})
+            {
+              $attDesc //= &convertToUTF8($att->{title});
+              $textPost .= "\"". $attDesc ."\" ";
+              $textPostPretty .= "\"". $attDesc ."\" ";
+            }
+            $textPost .= "[not downloaded]";
+            $textPostPretty .= "[not downloaded]";
+          }
+        }
+
+        # unknown attachment type
+        else
+        {
+          &print_warning("attachment type is not \"file\" but \"", $att->{type} ,"\".");
+        }
+
+        $textPost .= "\n";
+        $textPostPretty .= "<br/>\n";
+
+        $attNum++;
+      }
+    }
+
+    # user reactions to the Message
+    if ($m->{reactions} and ref $m->{reactions} eq ref {})
+    {
+      my $s = keys %{ $m->{reactions} };
+      foreach my $reaction (keys %{ $m->{reactions} })
+      {
+        $textPost .= " $reaction : ";
+        # colorize textual emojis
+        $textPostPretty .= " <span style=\"color: $colorEmojiFG; background-color: $colorEmojiBG\">$reaction</span> ";
+        my @names;
+        foreach my $n (@{ $m->{reactions}{$reaction}{names} })
+        {
+          $n = &convertToUTF8($n);
+          if ($n =~ /(.+), (.+)/)
+          {
+            $n = $2 ." ". $1;
+            push @names, $n;
+          }
+        }
+        $textPost .= join(", ", @names) ."\n";
+        $textPostPretty .= join(", ", @names) ."<br/>\n";
+      }
+    }
+
+    # if this is part of a thread
+    if ($thread)
+    {
+      # continuation from the last message?
+      if ($thread ne $currentThread)
+      {
+        $currentThread = $thread;
+
+        my $thread_ts = &convertTS( $MSGcache{$thread}{ts}, "%Y-%m-%d %H:%M:%S" );
+        my $thread_text = $MSGcache{$thread}{text};
+        $thread_text =~ s|\n\s*| // |mg;   # remove newlines
+        $thread_text = substr($thread_text, 0, 55) ."..."  if (length($thread_text)> 58);
+
+        $textPre .= "\n[Fortsetzung im Nebenchat [". $thread_ts ."]: ". $thread_text ."]\n";
+        # using a shortened pretty version of the text will create problems with shortened HTML TAGs
+        $textPrePretty .= "<br/>\n<span style=\"color:$colorSubthread\">[Fortsetzung im Nebenchat [". $thread_ts ."]: ". $thread_text ."]</span><br/>\n";
+      }
+
+      # indent the message line to show that it belongs to a thread
+      $text = "  ". $text;
+      $textPretty = "&nbsp;&nbsp;". $textPretty;
+    }
+    else
+    {
+      if ($currentThread)
+      {
+        # leave thread
+        $currentThread = 0;
+
+        # add empty lines before the message to show end of thread
+        if ($msgDatePrev eq $msgDate)     # but not at the beginning of a new day
+        {
+          $textPre = "\n\n". $textPre;
+          $textPrePretty = "<br/><br/>\n". $textPrePretty;
+        }
+      }
+    }
+
+    # if this is a reply to a previous message
+    if (@replyTo)
+    {
+      my ($reply_ts, $reply_username, $reply_text);
+
+      # print STDERR "Multi-reply (", $#replyTo +1, ") in $roomname, m->{ts}\n"  if $#replyTo > 0;
+      $textPre .= "\n";
+      $textPrePretty .= "<br/>\n";
+
+      foreach my $reply (@replyTo)
+      {
+        ($reply_ts, $reply_username, $reply_text) = ('','','');
+        $reply_ts = $m->{attachments}[$reply]->{ts};
+        $reply_ts = &convertTS($reply_ts, "%Y-%m-%d %H:%M:%S");
+        $reply_username = $m->{attachments}[$reply]->{author_name};
+        # TODO: loop through all attachments
+        if ($m->{attachments}[$reply]->{attachments}[0]{type} and $m->{attachments}[$reply]->{attachments}[0]{type} eq 'file')
+        {
+          $reply_text = "[Anhang] ";
+        }
+        elsif ($m->{attachments}[$reply]->{text})
+        {
+          $reply_text = $m->{attachments}[$reply]->{text};
+          $reply_text = $1  while ($reply_text =~ /^\[ \]\($server[^)]+\) (.*)/s);
+        }
+        $reply_text = &convertToUTF8( $reply_text );
+        $reply_text =~ s|\n\s*| // |mg;   # remove newlines
+        $reply_text = substr($reply_text, 0, 55) ."..."  if (length($reply_text)> 58);
+
+        if ($thread)
+        {
+          # indent the message line to show that it belongs to a thread
+          $textPre .= "  ";
+          $textPrePretty .= "&nbsp;&nbsp;";
+        }
+
+        $textPre .= "[Antwort auf ". $reply_username .": [". $reply_ts ."]: ". $reply_text ."]\n";
+        $textPrePretty .= "<span style=\"color:$colorReply\">[Antwort auf ". $reply_username .": [". $reply_ts ."]: ". $reply_text ."]</span><br/>\n";
+      }
+    }
+
+
+    ############
+    # now process the real text line(s)
+    my $msgText = '';
+    $msgText = &convertToUTF8( $m->{msg} )  if ($m->{msg});
+
+    # in replies delete unnecessary strange URL to original message from the message text
+    if (@replyTo)
+    {
+      # could be a reply to multiple messages (-> multiple attachments)
+      while ($msgText =~ /^\[ \]\($server[^)]+\) (.*)/s)
+      {
+        $msgText = $1;
+      }
+    }
+
+    # we need to change the message text for some special message types
+    $chat->specialMsg(\%specialMsg); # set translation to German
+    $msgText = $chat->processMessageType(msg => $m, msgText => $msgText, name => $msgSenderName);
+
+    # for the text and the html part
+    my $t = $msgText;
+    my $h = $msgText;
+
+    # colorize textual emojis
+    $h =~ s/(^|\n|\s)(:[a-z0-9_+-]+:)/ <span style="color: $colorEmojiFG; background-color: $colorEmojiBG">$2<\/span>/g;
+
+    # treat newlines in $msgText
+    if ($msgText =~ /\n/mg)
+    {
+      $t =~ s/\n/\n          $indent/mg; # indent continued lines
+      $h =~ s/\n/<br\/>\n&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;/mg; # break and indent continued lines
+    }
+
+    # make URIs clickable:
+    my $finder = URI::Find->new(sub {
+      my(undef,$found) = @_;
+      "<a href=\"$found\">$found</a>";
+    });
+    $finder->find(\$h);
+
+    # support simple Markup
+    $h =~ s/ \*([^*]+)\* / <strong>$1<\/strong> /g;
+    $h =~ s/ _([^_]+)_ / <i>$1<\/i> /g;
+    $h =~ s/ ~([^~]+)~ / <strike>$1<\/strike> /g;
+
+    # append to text line
+    $text .= $t;
+    $textPretty .= $h;
+
+
+    # save for later (for quoting in replies and threads)
+    $MSGcache{ $m->{_id} }{ts} = $m->{ts};
+
+    # add note about attachment
+    if ($foundAttachment)
+    {
+      $MSGcache{ $m->{_id} }{text} = "[Anhang] ". $t;
+    }
+    else
+    {
+      $MSGcache{ $m->{_id} }{text} = $t;
+    }
+
+
+    # add a note whether the author edited the text lateron
+    if ($m->{editedBy})
+    {
+      if (not $m->{t} or $m->{t} ne 'rm')
+      {
+        $text .= " [Nachricht bearbeitet]";    # by $m->{editedBy}->{username};
+        $textPretty .= " <i>[Nachricht bearbeitet]</i>";    # by $m->{editedBy}->{username};
+      }
+    }
+
+    $text .= "\n";
+    $textPretty .= "</span><br/>\n";
+
+    $chat{$msgDate} .= $textPre  if $textPre;
+    $chat{$msgDate} .= $text;
+    $chat{$msgDate} .= $textPost  if $textPost;
+
+    $chatHTML{$msgDate} .= $textPrePretty  if $textPrePretty;
+    $chatHTML{$msgDate} .= $textPretty;
+    $chatHTML{$msgDate} .= $textPostPretty  if $textPostPretty;
+
+    $msgDatePrev = $msgDate;
+  }
+
+  #####################
+  # loop through days to create the e-mail
+  #####################
+  foreach my $day (sort keys %chat)
+  {
+    my ($mailmsg, $text_part, $html_part, $subject);
+    my ($msgTXT, $msgHTML);
+
+    my $timestring = $day . " at 23:59:59";
+    my $fullDateString;
+    $err = $oo_date->parse($timestring);
+    if ($err)
+    {
+      print STDERR "DATE PARSE ERROR of \"$timestring\": ", $oo_date->err(), "\n";
+      &cleanup_and_exit(200);
+    }
+
+    $oo_date->config("Language","German"); # German day names
+    $fullDateString = $oo_date->printf("%A, %Y-%m-%d");
+    $oo_date->config("Defaults","1"); # reset
+
+    if ($groupchat)
+    {
+      $subject = "Chat Gruppe \"$senderName\" ($day)";
+    }
+    else
+    {
+      $subject = "Chat mit $senderName ($day)";
+    }
+
+    $msgTXT = "\n";
+    $msgHTML = "<html><head><meta http-equiv=\"Content-Type\" content=\"text/html; charset=utf-8\" /></head><body>\n";
+    if ($groupchat)
+    {
+      $msgTXT .= "Chat Gruppe \"$senderName\" am ". $fullDateString .":\n";
+      $msgHTML .= "<h3>Chat Gruppe <span style=\"color:$colorSender\">$senderName</span> am ". $fullDateString .":</h3>\n";
+    }
+    else
+    {
+      $msgTXT .= "Chat mit $senderName am ". $fullDateString .":\n";
+      $msgHTML .= "<h3>Chat mit <span style=\"color:$colorSender\">". $senderName ."</span> am ". $fullDateString .":</h3>\n";
+    }
+    $msgTXT .= "\n" .
+              $chat{$day} .
+              "\n";
+    $msgHTML .= "<br/>\n" .
+               $chatHTML{$day} .
+               "</body></html>\n";
+
+
+    if ($textOutputOnly)
+    {
+      print STDERR $subject ."\n";
+      print $msgTXT;
+    }
+
+    else
+    {
+      # compose multipart/alternative mail message (with HTML part and images)
+      # THANKS to: http://chadsikorra.com/scripting/perl-mimelite-example
+      $mailmsg = MIME::Lite->new(
+        Date    => $oo_date->printf("%a, %d %b %Y %H:%M:%S %z"),    # fake sent-date
+        From    => encode_mimewords( $groupchat?"Gruppe $senderName":"$senderName", Charset => 'utf-8', Encoding => 'Q') ." <$senderEmail>",
+        To      => "$username\@$MAILDOMAIN",
+        Subject => encode_mimewords($subject, Charset => 'utf-8', Encoding => 'Q'),
+        Type     => 'multipart/alternative',
+        Encoding => '8bit',
+                              );
+      $mailmsg->attr('content-type.charset' => 'UTF-8');
+
+      my $msgID = "<$senderName-". $oo_date->secs_since_1970_GMT ."\@$self.$MAILDOMAIN>";
+      $msgID =~ s/\s+/_/g;
+
+      # custom headers
+      $mailmsg->add("Message-ID"  => $msgID);  # unique identifier
+      $mailmsg->add("User-Agent"  => "$self [version $VERSION]");
+      $mailmsg->add("Status"      => "RO");   # set mail status as read
+
+      # now create the text part separately
+      $text_part = MIME::Lite::->new(
+        'Type'     => 'text/plain; charset="UTF-8"',
+        'Data'     => $msgTXT,
+        'Date'     => $oo_date->printf("%a, %d %b %Y %H:%M:%S %z"),
+        'Encoding' => '8bit',
+      );
+
+      # now another part for the HTML, setting the type on this one to 'Multipart/Related'
+      $html_part = MIME::Lite::->new(
+        'Type'    => 'multipart/related',
+        'Date'    => $oo_date->printf("%a, %d %b %Y %H:%M:%S %z"),
+      );
+
+      # Add the HTML. Include the picture. Then attach the picture to the HTML part.
+      $html_part->attach(
+        'Type' => 'text/html; charset="UTF-8"',
+        'Data'     => $msgHTML,
+        'Encoding' => '8bit',
+      );
+
+      foreach my $attachment (@{ $attachments{$day} })
+      {
+        print STDERR "attachment: ". $attachment->{'Path'} ."\n"  if $debug > 2;
+
+        if (not -e $attachment->{'Path'})
+        {
+          &print_warning("File not found ($day: $roomname): ". $attachment->{'Path'});
+        }
+        elsif (not -r $attachment->{'Path'})
+        {
+          &print_error("File is not readable: ". $attachment->{'Path'});
+        }
+        else
+        {
+          &addMailAttachment($html_part, $attachment);
+        }
+      }
+
+      # finally, attach the text part to the main message, then attach the HTML part
+      # (this is actually the order in which mail clients prefer it)
+      $mailmsg->attach($text_part);
+      $mailmsg->attach($html_part);
+
+      print "From $senderEmail ", $oo_date->printf("%a %b %e %H:%M:%S %Y"), "\n";
+      #print $mailmsg->as_string;
+      print $mailmsg->header_as_string . "\n";
+      print $mailmsg->body_as_string . "\n";
+
+      foreach my $attachment (@{ $attachments{$day} })
+      {
+        &print_debug("Deleting mediafile ". $attachment->{'Path'} ."\n", 5);
+        unlink ($attachment->{'Path'});
+      }
+    }
+
+  print STDERR "...done with day $day.\n"  if $debug > 1;
+  }
+
+  print STDERR "...done with room $roomname.\n"  if $debug > 1;
+}
+
+&cleanup_and_exit();
+
+
+####################################
+# helper routines
+####################################
+
+# read json hash from file
+# (returns hash reference)
+sub loadJSONfile
+{
+  my ($jsonDBPath) = @_;
+
+  my ($href, $JSONdata);
+  open(JS,"<$jsonDBPath");
+  $JSONdata = <JS>;
+  close(JS);
+  $href = decode_json($JSONdata);
+
+#  %msgs = %$href;
+  return $href;
+}
+
+# pass a formatstring like "%H:%M:%S" or "%Y-%m-%d %H:%M:%S"
+sub convertTS
+{
+  my ($ts, $format) = @_;
+
+  $err = $oo_date->parse($ts);
+  if ($err)
+  {
+    die "DATE PARSE ERROR of \"$ts\": ". $oo_date->err();
+  }
+
+  # convert to our time zone
+  $err = $oo_date->convert("Europe/Berlin");
+  if ($err)
+  {
+    print "DATE TZ CONVERSION ERROR: ". $oo_date->err();
+  }
+
+  return $oo_date->printf($format);
+}
+
+
+sub convertTStoEpochSecs
+{
+  my ($ts) = @_;
+
+  $err = $oo_date->parse($ts);
+  if ($err)
+  {
+    die "DATE PARSE ERROR of \"$ts\": ". $oo_date->err();
+  }
+
+  # convert to epoch secs
+  return $oo_date->secs_since_1970_GMT();
+}
+
+
+sub convertToUTF8
+{
+  my ($string) = @_;
+
+  my $stringBackup = $string;
+  my $string2 = $string;
+
+  if (defined $string)
+  {
+    if (utf8::valid($string))
+    {
+      print "DEBUG($debug): decoding $string\n"  if $debug > 10;
+      utf8::decode($string);
+    }
+
+    eval {
+      $string2 = encode("UTF-8", $string, Encode::FB_CROAK);
+    };
+    $string2 = undef if $@;
+
+
+    if (defined $string2)
+    {
+      print "DEBUG($debug): convertToUTF8: $stringBackup -> $string2\n"  if $debug > 10;
+      return $string2;
+    }
+
+    &print_warning("Encode couldn't convert \"$stringBackup\" to UTF-8.");
+  }
+
+  # otherwise don't change anything
+  return $string;
+}
+
+
+# email address for chatter or chat room
+# (ignores first name if empty)
+sub getSenderEmail
+{
+  my ($senderFN, $senderLN) = @_;
+
+  my $addr;
+
+  if (not $senderFN)
+  {
+    $addr = $senderLN;
+  }
+  else
+  {
+    $addr = $senderFN .".". $senderLN;
+  }
+
+  $addr =~ s/ /_/g;
+  $addr =~ s/ä/ae/g;
+  $addr =~ s/ö/oe/g;
+  $addr =~ s/ü/ue/g;
+  $addr =~ s/Ä/Ae/g;
+  $addr =~ s/Ö/Oe/g;
+  $addr =~ s/Ü/Ue/g;
+  $addr =~ s/ß/ss/g;
+  $addr =~ tr/áéíóúàèìòùçñÁÉÍÓÚÀÈÌÒÙÇÑÎ/aeiouaeioucnAEIOUAEIOUCNI/;
+
+  return $addr ."@". $MAILDOMAIN;
+}
+
+# find exact mimetype of a certain image file
+sub getMimetypeAndExtension
+{
+  my ($filepath) = @_;
+
+  my ($mimetype, $ext, $extensions);
+
+  # stop here if file is not readable
+  return ("application/binary", "data")  unless -r $filepath;
+
+  &print_debug("Detected mimetype of \"$filepath\" is: ", 3);
+
+  $mimetype = mimetype($filepath);
+  $extensions = join(",", extensions($mimetype));
+  $ext = extensions($mimetype);     # normally use the first one
+
+  # but in some cases better use a more common extension
+  $ext = "mp4"  if $ext eq 'f4v';
+  $ext = "xml"  if $ext eq 'rng';
+  $ext = "pl"  if $ext eq 'al';
+  $ext = "mp3"  if $ext eq 'mpga';
+  $ext = "jpg"  if $ext eq 'jpeg';
+
+  &print_debug("$mimetype ($ext) ($extensions)\n", 3);
+
+  return ($mimetype, $ext);
+}
+
+# add an attachment to a mail message
+sub addMailAttachment
+{
+  my ($msg, $attachment) = @_;
+
+  my $errorcode;
+  my $mimetype = $attachment->{'Type'};
+  my $pathname = $attachment->{'Path'};
+  my $filename = $attachment->{'Name'};
+
+  if ($filename eq '')
+  {
+    $filename = $pathname;
+    $filename =~ s|.*/||;         # strip file path
+  }
+
+  $msg->attach(
+    Type        => $mimetype,
+    Path        => $pathname,
+    Id          => $attachment->{'UID'},
+    Filename    => $filename,
+    Disposition => 'inline',
+  );
+
+  return;
+}
+
+
+sub print_info
+{
+  my ($text) = @_;
+
+  print STDERR "INFO: ". $text ."\n";
+}
+
+sub print_warning
+{
+  my ($text) = @_;
+
+  print STDERR "WARNING: ". $text ."\n";
+
+  $warnings_occurred++;
+}
+
+sub print_error
+{
+  my ($text) = @_;
+
+  print STDERR "ERROR: ". $text ."\n";
+
+  $errors_occurred++;
+
+  if ($errors_occurred > 10)
+  {
+    print STDERR "ERROR: Too many errors ($errors_occurred) -> quitting\n";
+    &cleanup_and_exit();
+  }
+}
+
+sub print_debug
+{
+  my ($text, $debug_level) = @_;
+
+  $debug_level = 0  unless $debug_level;
+
+  if ($debug >= $debug_level)
+  {
+    print STDERR "DEBUG($debug_level): ". $text;
+  }
+}
+
+sub error_exit
+{
+  my ($text, $exitcode) = @_;
+
+  &print_error($text);
+  &cleanup_and_exit($exitcode);
+}
+
+# nötige Aufräumarbeiten am Ende
+sub cleanup
+{
+  &print_debug("cleanup done.\n", 1);
+}
+
+# Exitcode als optionaler Parameter
+sub cleanup_and_exit
+{
+  my ($exitcode) = @_;
+  $exitcode = 0  unless $exitcode;
+
+  &cleanup();
+
+  if ($warnings_occurred)
+  {
+    print STDERR "WARNING: There were $warnings_occurred warnings.\n";
+  }
+
+  if ($errors_occurred)
+  {
+    print STDERR "Done but there were $errors_occurred ERRORs.\n";
+    exit 100+$errors_occurred  unless $exitcode;
+  }
+
+  &print_debug("$self (v$VERSION) done.\n", 1);
+  exit $exitcode;
+}
+
+
+#----------------------------------------------------------------------------
+# Doku
+#----------------------------------------------------------------------------
+
+__END__
+
+=head1 NAME
+
+rocketchat-to-mail  --  download all chats from Rocketchat and save them in mail (mbox) format
+
+=head1 SYNOPSIS
+
+C<rocketchat-to-mail> [--help|--usage] [--version] [--manpage] [--debug] [--text-output] [--since <DATE>] [--room <ROOMNAME>] [--dir <PATH>]
+
+
+=head1 DESCRIPTION
+
+B<rocketchat-to-mail> downloads the chat history from a Rocketchat server and writes daily digests of all chats in mbox format.
+Media files are also downloaded and attached to the mails.
+
+Output is written to standard out.
+
+
+=head1 SETUP and CONFIGURATION
+
+You need to install some OS packages and you have to adjust some variables
+in the section "CONFIGURABLE VARIABLES".  The user, server URL and
+authentication data can be read from environment variables.  As alternative
+to a password you can authenticate with USERID and AUTHTOKEN.  You can get
+these inside your RocketChat user profile.  Then you specify USERID and
+AUTHTOKEN as named hashes or as environment variables ROCKETCHAT_USERID and
+ROCKETCHAT_AUTHTOKEN.
+
+
+=head1 OPTIONS
+
+All options can be shortened with their first (unique) characters.
+
+=over 3
+
+=item B<--since DATE>
+
+Ignore everything before this date.  Default is: don't ignore anything.
+
+=item B<--room ROOMNAME>
+
+Only process the chats from this room.  Default is: all rooms (can take a long time)
+
+=item B<--dir PATHNAME>
+
+Optional: Directory for the downloaded Rocketchat's attachment files.
+ Example: /tmp/rocketchat-export/
+
+Without this option, no attachments are downloaded.
+
+=item B<--text-output>
+
+Write only text output instead of emails in mbox format.
+Attachments will be stored in download directory if option B<--dir PATHNAME> is set.
+
+=item B<--debug>
+
+show debug messages (can be used multiple times to increase the debug level)
+
+=item B<--help>, B<--usage>
+
+show command syntax
+
+=item B<--manpage>
+
+show complete manpage
+
+=item B<--version>
+
+show program version
+
+=back
+
+
+=head1 EXAMPLES
+
+  $ rocketchat-to-mail --since 2020-10-01 --dir /tmp/rocketchat-export/ > rocketchat-export.mbox
+
+
+=head1 TODOs
+
+=over
+
+=item B<* Replies to replies could be handled smarter>
+
+=item B<* Process livechats>
+
+=item B<* Translation - currently only in German>
+
+=back
+
+
+=head1 EXITCODES
+
+B<0>  everything okay
+
+Any other exitcode means something has gone wrong.
+
+
+=head1 LEGALESE
+
+Copyright 2021 Andy Spiegl <rocketchat-to-mail.andy@spiegl.de>
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included
+in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
+THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+http://www.opensource.org/licenses/mit-license.php
+
+=head1 AUTHOR
+
+Dr. Andy Spiegl E<lt>rocketchat-to-mail.andy@spiegl.deE<gt>
+
+=cut
