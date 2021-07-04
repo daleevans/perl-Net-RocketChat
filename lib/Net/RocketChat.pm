@@ -1,6 +1,6 @@
 package Net::RocketChat;
 # ABSTRACT: Implements the REST API for Rocket.Chat
-$Net::RocketChat::VERSION = '0.003';
+$Net::RocketChat::VERSION = '0.006';
 =head1 NAME
 
 Net::RocketChat
@@ -309,6 +309,35 @@ method logout {
    if ($self->debug) {
       print STDERR Dumper($self->response);
    }
+}
+
+=item getUserInfo(:$username,:$userid)
+
+Gets all user details, specified either by username or id.
+
+   my $userinfo = $chat->getUserInfo(username => "ab123cde");
+
+=cut
+
+method getUserInfo(:$username,:$userid) {
+   if (not $userid and not $username)
+   {
+     die "ERROR: getUserInfo needs either userid or username";
+   }
+
+   if ($username)
+   {
+     $self->get($self->server . "/api/v1/users.info?username=$username");
+   }
+   else
+   {
+     $self->get($self->server . "/api/v1/users.info?userId=$userid");
+   }
+
+   if ($self->debug) {
+      print STDERR Dumper($self->response);
+   }
+   return decode_json($self->response->content)->{"user"};
 }
 
 =item getMyRooms
@@ -688,7 +717,7 @@ method getFilesList(:$id,:$room) {
    $id //= $self->get_room_id(room => "$room");
    $room //= $self->get_room_name(id => "$id");
 
-   $self->get($self->server . "/v1/im.files?roomId=$id");
+   $self->get($self->server . "/api/v1/im.files?roomId=$id");
    if ($self->debug) {
       print STDERR Dumper($self->response);
    }
@@ -716,9 +745,10 @@ method getFile(:$fileURL) {
 
 Downloads and saves an attached file from a message, specified by the fileURL.
 Tries to find a good filename and file extension.
-Returns the filename.
 
-   my $filename = $chat->saveAttachment(att => $attachmentObject, downloadFolder => "savedFiles);
+Returns the filename and the MIME type, e.g. "image/gif".
+
+   my ($filename, $filetype) = $chat->saveAttachment(att => $attachmentObject, downloadFolder => "savedFiles);
 
 =cut
 
@@ -789,6 +819,10 @@ method saveAttachment(:$att, :$downloadFolder) {
   { $fext='jpg'; }
   elsif ($ft eq 'image/png')
   { $fext='png'; }
+  elsif ($ft eq 'audio/mpeg')
+  { $fext='mp3'; }
+  elsif ($ft eq 'video/mp4')
+  { $fext='mp4'; }
   elsif ($ft eq 'application/pdf')
   { $fext='pdf'; }
   else
@@ -802,6 +836,17 @@ method saveAttachment(:$att, :$downloadFolder) {
     $fn .= "." . $fext;
   }
 
+  # don't overwrite existing files
+  if (-e "$downloadFolder/$fn")
+  {
+    my $fnNum = 1;
+    while ( -e $downloadFolder ."/". $fnNum ."-". $fn )
+    {
+      $fnNum++;
+    }
+    $fn = $fnNum ."-". $fn;
+  }
+
   # download and save attachment
   print STDERR "DEBUG: downloading attachment from URL: ", $att->{title_link}, "\n"  if ($self->debug);
   open (ATT, ">$downloadFolder/$fn") or do
@@ -812,7 +857,7 @@ method saveAttachment(:$att, :$downloadFolder) {
   print ATT $self->getFile( fileURL => $att->{title_link} );
   close ATT;
 
-  return $fn;
+  return ($fn, $ft);
 }
 
 =item send(:$room,:$id,:$message)
@@ -973,15 +1018,7 @@ L<https://github.com/raid1/perl-Net-RocketChat>
 
 L<Developer Guide (REST API)|https://developer.rocket.chat/api/rest-api>
 
-Dale Evans, C<< <daleevans@github> >> L<http://devans.mycanadapayday.com>
-
-=head1 REPOSITORY
-
-L<https://github.com/daleevans/perl-Net-RocketChat>
-
-=head1 SEE ALSO
-
-
 =cut
 
 1;
+
