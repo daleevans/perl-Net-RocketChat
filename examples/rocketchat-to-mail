@@ -12,10 +12,11 @@
 # v0.2  2021-04-12: all necessary features implemented
 # v0.3  2021-04-12: merge with rocketchat-to-text (option --text-output)
 # v0.4  2021-04-13: handle multiple replies correctly, highlight emojis
+# 0.41  2021-07-16: more detailled installation instructions
 #
 ############################################
 
-my $VERSION = "0.4";
+my $VERSION = "0.41";
 
 ############################################
 
@@ -62,8 +63,15 @@ my $debug = 0;
 # PREREQUISITES:
 # apt install liburi-find-perl
 # apt install libmoose-perl libmethod-signatures-perl
-# cpan: install Net::RocketChat
-# or: https://github.com/daleevans/perl-Net-RocketChat, https://github.com/raid1/perl-Net-RocketChat
+# cpan: install Net::RocketChat  (make sure it's the version for the *new* API)
+# OR: https://github.com/raid1/perl-Net-RocketChat/tree/API-Adaptation
+# OR: https://github.com/daleevans/perl-Net-RocketChat
+# e.g.:
+## $ wget https://github.com/raid1/perl-Net-RocketChat/archive/refs/heads/API-Adaptation.zip
+## $ unzip API-Adaptation.zip
+## $ mv perl-Net-RocketChat-API-Adaptation/lib/Net $HOME/local/lib/perl/Net
+## $ Net-RocketChat-API-Adaptation/examples/rocketchat-to-mail --help
+
 use lib '/home/XXX/local/lib/perl';   # change this to YOUR perl-lib path
 use Net::RocketChat;
 
@@ -506,7 +514,7 @@ foreach my $roomname ( @roomsToProcess )
               $textPost .= " ($ft)"  if $ft;
 
               # show preview of picture inline
-              if ($ft =~ /^image/)
+              if (defined $ft and $ft =~ /^image/)
               {
                 $textPostPretty .= "<img width=\"90%\" alt=\"". $attDesc ."\" src=\"cid:$attUID\" />";
               }
