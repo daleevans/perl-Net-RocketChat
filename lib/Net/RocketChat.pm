@@ -1,6 +1,6 @@
 package Net::RocketChat;
 # ABSTRACT: Implements the REST API for Rocket.Chat
-$Net::RocketChat::VERSION = '0.006';
+$Net::RocketChat::VERSION = '0.007';
 =head1 NAME
 
 Net::RocketChat
@@ -204,7 +204,9 @@ has 'specialMsg' => (
                      'ru' => '[Removed user by __N__: __T__]',
                      'ut' => '[__N__ (__T__) has joined the conversation]',
                      'uj' => '[__N__ (__T__) has joined the channel]',
+                     'ujt' => '[__N__ (__T__) has joined the team]',
                      'ul' => '[__N__ has left the channel]',
+                     'ult' => '[__N__ (__T__) has left the team]',
                      'user-muted' => '[User __T__ muted by __N__]',
                      'user-unmuted' => '[User __T__ unmuted by __N__]',
                      'subscription-role-added' => '[__T__ was set __R__ by __N__]',
@@ -781,11 +783,18 @@ method saveAttachment(:$att, :$downloadFolder) {
     die "ERROR: Cannot save attachment without a filename.\n";
   }
 
-  # try to find out the filetype
-  # TODO: (missing RC documentation) is there also audio_type and/or video_type?
+  # try to find out the filetype (guessing because of missing RC documentation)
   if ($att->{image_type})
   {
     $ft = $att->{image_type};
+  }
+  elsif ($att->{video_type})
+  {
+    $ft = $att->{video_type};
+  }
+  elsif ($att->{audio_type})
+  {
+    $ft = $att->{audio_type};
   }
   else
   {
@@ -797,21 +806,49 @@ method saveAttachment(:$att, :$downloadFolder) {
   # work around missing RC documentation
   if ($att->{image_url} and $att->{image_url} ne $att->{title_link})
   {
-    print STDERR " (WARNING: image_url different from title_link: ", $att->{image_url}, ")";
+    my ($i, $t);
+    $i = $att->{image_url};
+    $t = $att->{title_link};
+    $i =~ s|.*/||;  # remove leading path
+    $t =~ s|.*/||;  # remove leading path
+
+    # only warn if the filename (not path) itself is different
+    if ($i ne $t)
+    {
+      print STDERR " (WARNING: image_url (", $att->{image_url}, ") different from title_link: ", $att->{title_link}, ")";
+    }
   }
   if ($att->{audio_url} and $att->{audio_url} ne $att->{title_link})
   {
-    print STDERR " (WARNING: audio_url different from title_link: ", $att->{audio_url}, ")";
+    print STDERR " (WARNING: audio_url (", $att->{audio_url}, ") different from title_link: ", $att->{title_link}, ")";
   }
   if ($att->{video_url} and $att->{video_url} ne $att->{title_link})
   {
-    print STDERR " (WARNING: video_url different from title_link: ", $att->{video_url}, ")";
+    print STDERR " (WARNING: video_url (", $att->{video_url}, ") different from title_link: ", $att->{title_link}, ")";
   }
 
   # detect file extension (in a not very smart way.  TODO: improve!)
   my $fext='';
   if ($ft eq '') {
-    # no filetype given - skip
+    # no filetype given - guess
+    if ($att->{title_link} =~ /\.txt$/)
+    { $ft='plain/text'; $fext='txt'; }
+    elsif ($att->{title_link} =~ /\.zip$/)
+    { $ft='application/zip'; $fext='zip'; }
+    elsif ($att->{title_link} =~ /\.pdf$/)
+    { $ft='application/pdf'; $fext='pdf'; }
+    elsif ($att->{title_link} =~ /\.7z$/)
+    { $ft='application/7zip'; $fext='7z'; }
+    elsif ($att->{title_link} =~ /\.xlsx$/)
+    { $ft='application/word'; $fext='docx'; }
+    elsif ($att->{title_link} =~ /\.docx$/)
+    { $ft='application/excel'; $fext='xlsx'; }
+    elsif ($att->{title_link} =~ /\.pptx$/)
+    { $ft='application/powerpoint'; $fext='pptx'; }
+    else
+    {
+      print STDERR "WARNING: no filetype given for attachment: \"", $att->{title_link} ,"\".\n";
+    }
   }
   elsif ($ft eq 'image/gif')
   { $fext='gif'; }
@@ -827,7 +864,7 @@ method saveAttachment(:$att, :$downloadFolder) {
   { $fext='pdf'; }
   else
   {
-    print STDERR "WARNING: unknown file extension for file type: \"$ft\".\n";
+    print STDERR "WARNING (improve the code!): unknown file extension for file type: \"$ft\".\n";
   }
 
   # add file extension to the filename if necessary
@@ -1017,6 +1054,14 @@ L<https://github.com/raid1/perl-Net-RocketChat>
 =head1 SEE ALSO
 
 L<Developer Guide (REST API)|https://developer.rocket.chat/api/rest-api>
+
+Dale Evans, C<< <daleevans@github> >> L<http://devans.mycanadapayday.com>
+
+=head1 REPOSITORY
+
+L<https://github.com/daleevans/perl-Net-RocketChat>
+
+=head1 SEE ALSO
 
 =cut
 
